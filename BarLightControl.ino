@@ -23,6 +23,7 @@
 #define TEMP_UNIT_BASE 101
 
 #define LENGTH(x) (strlen(x)+1)
+#include <map>
 
 #define SERVICE_UUID "9e62a128-7ec7-4c72-a799-4f869de36642"
 #define MESSAGE_UUID "60d73e30-02ad-460c-a5a3-b9ed26ec3ed4"
@@ -50,7 +51,10 @@ unsigned long wifiTryTime = 0;
 
 bool isAdvertising = false;
 int WifiStatus = 0;
+
 int ALS = 0;
+LightSetting currentLightSetting = dark;
+
 
 char StatusString[16];
 char MAC[17];
@@ -72,21 +76,23 @@ Adafruit_NeoPixel pixels4 = Adafruit_NeoPixel(LED_COUNT3, LED_DATA_PIN4, NEO_GRB
 
 
 //Ambient Light Sensor Control
-#include <Wire.h>
-#define I2C_Freq 100000
-#define SDA_0 22
-#define SCL_0 21
+// #include <Wire.h>
 
-#define SDA_1 32
-#define SCL_1 33
+#include "VEML3235SL.h"
+#include "LightScene.h"
+VEML3235SL LightSensor1 = VEML3235SL();
+LightScene CurrentScene = LightScene();
+// #define I2C_Freq 100000
+// #define SDA_0 22
+// #define SCL_0 21
+
+// #define SDA_1 32
+// #define SCL_1 33
 
 
 #define I2C_DEV_ADDR 0x10
 byte control_array[3] = { 0x0, 0x0c, 0x1};
 byte dataArray[3] = {I2C_DEV_ADDR, 0x09, I2C_DEV_ADDR+1};
-
-//TwoWire I2C_0 = TwoWire(16);
-//TwoWire I2C_1 = TwoWire(16);
 
 void StartAdvertising(BLEServer *btserver)
 {
@@ -201,19 +207,107 @@ void ClearCredentials()
   EEPROM.commit();
 }
 
-//void i2cWriteRegister(uint8_t reg, uint16_t mask, uint16_t bits, uint8_t startPosition)
-//{
-//  uint16_t _i2cWrite; 
-//
-//  _i2cWrite = _readRegister(_wReg); // Get the current value of the register
-//  _i2cWrite &= _mask; // Mask the position we want to write to.
-//  _i2cWrite |= (_bits << _startPosition);  // Place the given bits to the variable
-//  _i2cPort->beginTransmission(_address); // Start communication.
-//  _i2cPort->write(_wReg); // at register....
-//  _i2cPort->write(_i2cWrite); // Write LSB to register...
-//  _i2cPort->write(_i2cWrite >> 8); // Write MSB to register...
-//  _i2cPort->endTransmission(); // End communcation.
-//}
+LightSetting CheckNewALSState()
+{
+  if(ALS < 100)
+  {
+    return dark;
+  }
+  else if (ALS < 150)
+  {
+    return dim;
+  }
+  else if (ALS < 250)
+  {
+    return light;
+  }
+  else 
+  {
+    return bright;
+  }
+
+}
+
+void UpdateFromALS(LightSetting nextSetting)
+{
+  UpdateFromScene(nextSetting)
+  currentLightSetting = nextSetting;
+
+}
+
+void UpdateLightSensorValues()
+{
+
+  ALS = LightSensor1.getALS();
+
+  LightSetting next = CheckNewALSState();
+
+  if(next != currentLightSetting){
+    UpdateFromALS(next);
+  }
+
+}
+
+// void UpdateLightSensorValues()
+// {
+//   //Write message to the slave
+//   Wire.beginTransmission(I2C_DEV_ADDR);
+//   for(int t = 0; t < 3; t++)
+//   {
+//     Wire.write(control_array[t]);
+//   }
+
+//   Wire.endTransmission();
+  
+  
+//   Wire.beginTransmission(I2C_DEV_ADDR);
+//   Wire.write(0x05);
+// //  for (int i=0; i< 3; i++)
+// //  {
+// //    Wire.write(dataArray[i]);
+// //  }
+//   uint8_t error = Wire.endTransmission(false);
+//   Wire.requestFrom(I2C_DEV_ADDR,2, true);
+//   Serial.printf("available: %d\n", Wire.available());
+//   uint8_t lsb = Wire.read();
+//     Serial.println(lsb, HEX);
+//     uint8_t msb = Wire.read();
+//     Serial.println(msb, HEX);
+
+//     ALS = ((msb << 8) | lsb);
+//     UpdateFromALS();
+    
+//     Serial.println(ALS);
+// //  while(Wire.available() >= 1){
+// //    int c = Wire.read();
+// //    Serial.println(c, HEX);
+// //  }
+//   Serial.printf("endTransmission: %u\n", error);
+// }
+
+void UpdateFromScene(LightSetting nextSetting)
+{
+  RGB rgb;
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+  switch(nextSetting)
+  {
+    case dim:
+      rgb = CurrentScene.getDimRGB();
+      break;
+    case light:
+      rgb = CurrentScene.getLightRGB();
+      break;
+    case bright:
+      rgb = CurrentScene.getBrightRGB();
+      break;
+    default:
+      rgb = CurrentScene.getDarkRGB();
+  }
+
+  SetAllLEDs(1, rgb.red, rgb.green, rgb.blue);
+}
 
 
 
@@ -256,17 +350,7 @@ void SetAllLEDs(int channel, int red, int green, int blue)
 }
 
 
-void UpdateFromALS()
-{
-  if(ALS >120)
-  {
-    SetAllLEDs(1, 20, 0, 0);
-  }
-  else
-  {
-    SetAllLEDs(1, 0, 20, 0);
-  }
-}
+
 
 
 //////////////////////////////////////////////////
@@ -372,6 +456,30 @@ bool StartWifiServer(const char *ssid, const char *pw)
       int blue = doc["blue"];
       SetAllLEDs(channel, red, green, blue);
       request->send(200, "application/json", "unit set");
+    });
+
+    wifiServer.on("/scene", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+    {
+//        Serial.println("1");
+    },
+    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+    {
+      Serial.println("onupload");
+    },
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
+      StaticJsonDocument<200> doc;
+      DeserializationError error = deserializeJson(doc, data);
+      if (error) 
+      {
+          Serial.print(F("deserializeJson() failed: "));
+          Serial.println(error.f_str());
+          request->send(204, "text/plain", "error: parse error");
+          return;
+      }
+
+      request->send(200, "application/json", "scene set");
     });
 
     // Route to load style.css file
@@ -491,7 +599,8 @@ void StartBluetoothServer()
 void setup()
 {
     Serial.begin(115200);
-    Wire.begin();
+    // Wire.begin();
+    LightSensor1.begin();
 //    I2C_0.begin(SDA_0, SCL_0, I2C_Freq);
 //    I2C_1.begin(SDA_1, SCL_1, I2C_Freq);
     //Setup EEPROM
@@ -505,8 +614,8 @@ void setup()
     if(EEPROM.read(0) == 0xff)
     {
 //      StartBluetoothServer();
-        const char* ssid = ssid;
-        const char* pw = pw;
+        const char* ssid = "DevinsHotWifi";
+        const char* pw = "RickAndMorty123";
         Serial.println(ssid);
         Serial.println(pw);
 
@@ -530,39 +639,9 @@ void setup()
 void loop()
 {
   delay(1000);
-  //Write message to the slave
-  Wire.beginTransmission(I2C_DEV_ADDR);
-  for(int t = 0; t < 3; t++)
-  {
-    Wire.write(control_array[t]);
-  }
 
-  Wire.endTransmission();
+  UpdateLightSensorValues();
   
-  
-  Wire.beginTransmission(I2C_DEV_ADDR);
-  Wire.write(0x05);
-//  for (int i=0; i< 3; i++)
-//  {
-//    Wire.write(dataArray[i]);
-//  }
-  uint8_t error = Wire.endTransmission(false);
-  Wire.requestFrom(I2C_DEV_ADDR,2, true);
-  Serial.printf("available: %d\n", Wire.available());
-  uint8_t lsb = Wire.read();
-    Serial.println(lsb, HEX);
-    uint8_t msb = Wire.read();
-    Serial.println(msb, HEX);
-
-    ALS = ((msb << 8) | lsb);
-    UpdateFromALS();
-    
-    Serial.println(ALS);
-//  while(Wire.available() >= 1){
-//    int c = Wire.read();
-//    Serial.println(c, HEX);
-//  }
-  Serial.printf("endTransmission: %u\n", error);
   ArduinoOTA.handle();
 //  delay(1000);
 }
