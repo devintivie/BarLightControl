@@ -1,3 +1,6 @@
+#ifndef VEML3235SL_H // include guard
+#define VEML3235SL_H
+
 
 #include <stdint.h>
 
@@ -10,15 +13,16 @@
 
 class VEML3235SL 
 {
-
-
     public:
         VEML3235SL();
         ~VEML3235SL();
 
         bool begin();
-
         void writeRegister(uint8_t address, uint16_t value);
         uint16_t readRegister(uint8_t address);
         uint16_t getALS();
 };
+
+
+
+#endif

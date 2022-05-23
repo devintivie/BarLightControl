@@ -16,14 +16,15 @@
 
 //EEPROM and EEPROM VARIABLES
 #include <EEPROM.h>
-#define EEPROM_SIZE 105
+#define EEPROM_SIZE 140
 #define SSID_BASE 0
 #define PW_BASE 34
-#define SET_TEMP_BASE 100
-#define TEMP_UNIT_BASE 101
+#define DARK_BASE 100
+#define DIM_BASE 110
+#define LIGHT_BASE 120
+#define BRIGHT_BASE 130
 
 #define LENGTH(x) (strlen(x)+1)
-#include <map>
 
 #define SERVICE_UUID "9e62a128-7ec7-4c72-a799-4f869de36642"
 #define MESSAGE_UUID "60d73e30-02ad-460c-a5a3-b9ed26ec3ed4"
@@ -53,8 +54,15 @@ bool isAdvertising = false;
 int WifiStatus = 0;
 
 int ALS = 0;
-LightSetting currentLightSetting = dark;
 
+enum LightSetting{
+  dark,
+  dim,
+  light,
+  bright
+};
+
+LightSetting currentLightSetting = dark;
 
 char StatusString[16];
 char MAC[17];
@@ -79,9 +87,17 @@ Adafruit_NeoPixel pixels4 = Adafruit_NeoPixel(LED_COUNT3, LED_DATA_PIN4, NEO_GRB
 // #include <Wire.h>
 
 #include "VEML3235SL.h"
-#include "LightScene.h"
+#include "RGB.h"
 VEML3235SL LightSensor1 = VEML3235SL();
-LightScene CurrentScene = LightScene();
+//LightScene CurrentScene = LightScene();
+RGB Dark = RGB();//40, 0, 40);//nullptr;
+RGB Dim = RGB(10, 10, 10);//30, 30, 30);//nullptr;
+RGB Light = RGB();//25, 25, 0);//nullptr;
+RGB Bright = RGB();//1, 0, 1);//nullptr;
+
+int DarkLimit = 0;
+int DimLimit = 0;
+int LightLimit = 0;
 // #define I2C_Freq 100000
 // #define SDA_0 22
 // #define SCL_0 21
@@ -127,7 +143,6 @@ class MyServerCallbacks : public BLEServerCallbacks
       }
       else
       {
-        
         ESP.restart();
       }
     }
@@ -171,10 +186,26 @@ String ReadStringFromFlash(int startAddr, int length)
   return in;
 }
 
+void WriteByteToFlash(int startAddr, const uint8_t toStore)
+{
+  EEPROM.write(startAddr, toStore);
+  EEPROM.commit();
+}
+
 
 int ReadIntFromFlash(int startAddr, int length)
 {
-  int value = EEPROM.read(startAddr);
+  int value = 0;
+  if(length == 1)
+  {
+    value = EEPROM.read(startAddr);
+  }
+  else
+  {
+    int lo = EEPROM.read(startAddr);
+    int hi = EEPROM.read(startAddr + 1);
+    value = (hi << 8) + lo;
+  }
   return value;
 }
 
@@ -190,6 +221,57 @@ String LoadPassword()
   return pw;
 }
 
+int LoadLimit(int baseAddress)
+{
+  return ReadIntFromFlash(baseAddress+5, 2);
+}
+
+void SaveLimit(int baseAddress, int limit)
+{
+  uint8_t loLimit = limit & 0xff;
+  uint8_t hiLimit = limit >> 8;
+  WriteByteToFlash(baseAddress+5, loLimit);
+  WriteByteToFlash(baseAddress+6, hiLimit);
+}
+
+void SaveRGB(int address, RGB rgb)
+{
+  WriteByteToFlash(address, rgb.red);
+  WriteByteToFlash(address + 1, rgb.green);
+  WriteByteToFlash(address + 2, rgb.blue);
+}
+
+
+
+RGB LoadRGB(int address)
+{
+  int red = ReadIntFromFlash(address, 1);
+  int green = ReadIntFromFlash(address + 1, 1);
+  int blue = ReadIntFromFlash(address + 2, 1);
+
+  Serial.printf("loaded rgb = %i, %i, %i\n", red, green, blue);
+  return RGB(red, green, blue);
+}
+
+void LoadLimitsFromFlash()
+{
+  DarkLimit = LoadLimit(DARK_BASE);
+  Serial.printf("loaded dark limit = %i\n", DarkLimit);
+  DimLimit = LoadLimit(DIM_BASE);
+  Serial.printf("loaded dim limit = %i\n", DimLimit);
+  LightLimit = LoadLimit(LIGHT_BASE);
+  Serial.printf("loaded light limit = %i\n", LightLimit);
+}
+
+void LoadRGBFromFlash()
+{
+  Dark = LoadRGB(DARK_BASE);
+  Serial.printf("dark rgb = %i, %i, %i\n", Dark.red, Dark.green, Dark.blue);
+  Dim = LoadRGB(DIM_BASE);
+  Light = LoadRGB(LIGHT_BASE);
+  Bright = LoadRGB(BRIGHT_BASE);
+  UpdateFromALS(currentLightSetting);
+}
 
 
 void SaveCredentials(const char *ssid, const char *pw)
@@ -198,9 +280,10 @@ void SaveCredentials(const char *ssid, const char *pw)
     WriteStringToFlash(pw, PW_BASE);
 }
 
+
 void ClearCredentials()
 {
-  for(int i = 0; i <SET_TEMP_BASE; i++ )
+  for(int i = 0; i <DARK_BASE; i++ )
   {
     EEPROM.write(i, 0xFF);
   }
@@ -209,15 +292,15 @@ void ClearCredentials()
 
 LightSetting CheckNewALSState()
 {
-  if(ALS < 100)
+  if(ALS < DarkLimit)
   {
     return dark;
   }
-  else if (ALS < 150)
+  else if (ALS < DimLimit)
   {
     return dim;
   }
-  else if (ALS < 250)
+  else if (ALS < LightLimit)
   {
     return light;
   }
@@ -230,18 +313,17 @@ LightSetting CheckNewALSState()
 
 void UpdateFromALS(LightSetting nextSetting)
 {
-  UpdateFromScene(nextSetting)
+  UpdateFromScene(nextSetting);
   currentLightSetting = nextSetting;
 
 }
 
 void UpdateLightSensorValues()
 {
-
   ALS = LightSensor1.getALS();
-
   LightSetting next = CheckNewALSState();
 
+  Serial.printf("Light Value = %i, %i\r\n", ALS, next);
   if(next != currentLightSetting){
     UpdateFromALS(next);
   }
@@ -287,33 +369,25 @@ void UpdateLightSensorValues()
 
 void UpdateFromScene(LightSetting nextSetting)
 {
-  RGB rgb;
-  uint8_t red;
-  uint8_t green;
-  uint8_t blue;
   switch(nextSetting)
   {
     case dim:
-      rgb = CurrentScene.getDimRGB();
+      SetAllLEDs(1, Dim.red, Dim.green, Dim.blue);
       break;
     case light:
-      rgb = CurrentScene.getLightRGB();
+      SetAllLEDs(1, Light.red, Light.green, Light.blue);
       break;
     case bright:
-      rgb = CurrentScene.getBrightRGB();
+      SetAllLEDs(1, Bright.red, Bright.green, Bright.blue);
       break;
     default:
-      rgb = CurrentScene.getDarkRGB();
+      SetAllLEDs(1, Dark.red, Dark.green, Dark.blue);
+      break;
   }
-
-  SetAllLEDs(1, rgb.red, rgb.green, rgb.blue);
 }
-
-
 
 void SetAllLEDs(int channel, int red, int green, int blue)
 {
-
 //    if(channel >= 1 && channel <= 4)
 //    {
 //      
@@ -337,7 +411,9 @@ void SetAllLEDs(int channel, int red, int green, int blue)
 
       
       // pixels.Color takes RGB values, from 0,0,0 up to 255,255,255
-      Serial.println("Send all LEDs a 255 and wait 2 seconds.");
+//      Serial.println("Send all LEDs a 255 and wait 2 seconds.");
+
+    Serial.printf("set rgb = %i, %i, %i\n", red, green, blue);
      for(int l = 0; l < LED_COUNT1; l++) 
      {
        pixels1.setPixelColor(l, pixels1.Color(red,green,blue));
@@ -429,57 +505,255 @@ bool StartWifiServer(const char *ssid, const char *pw)
         request->send(SPIFFS, "/update.html", "text/html");
     });
 
-    wifiServer.on("/led/all", HTTP_PUT,
+    wifiServer.on(
+      "/led/all", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+      {
+  //        Serial.println("1");
+      },
+      [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+      {
+        Serial.println("onupload");
+      },
+      [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+      {
+        StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        int channel = doc["channel"];
+        int red = doc["red"];
+        int green = doc["green"];
+        int blue = doc["blue"];
+        SetAllLEDs(channel, red, green, blue);
+        request->send(200, "application/json", "unit set");
+      });
+
+    wifiServer.on("/dark/rgb", HTTP_PUT,
       [](AsyncWebServerRequest *request)
     {
-//        Serial.println("1");
     },
     [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
     {
-      Serial.println("onupload");
     },
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
     {
       StaticJsonDocument<200> doc;
-      DeserializationError error = deserializeJson(doc, data);
-      if (error) 
-      {
-          Serial.print(F("deserializeJson() failed: "));
-          Serial.println(error.f_str());
-          request->send(204, "text/plain", "error: parse error");
-          return;
-      }
-
-      int channel = doc["channel"];
-      int red = doc["red"];
-      int green = doc["green"];
-      int blue = doc["blue"];
-      SetAllLEDs(channel, red, green, blue);
-      request->send(200, "application/json", "unit set");
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        int channel = doc["channel"];
+        int red = doc["red"];
+        int green = doc["green"];
+        int blue = doc["blue"];
+        Dark = RGB(red, green, blue);
+        SaveRGB(DARK_BASE, Dark);
+        UpdateFromScene(currentLightSetting);
+        request->send(200, "application/json", "dark rgb set");
     });
 
-    wifiServer.on("/scene", HTTP_PUT,
+    wifiServer.on("/dark/limit", HTTP_PUT,
       [](AsyncWebServerRequest *request)
     {
-//        Serial.println("1");
     },
     [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
     {
-      Serial.println("onupload");
     },
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
     {
       StaticJsonDocument<200> doc;
-      DeserializationError error = deserializeJson(doc, data);
-      if (error) 
-      {
-          Serial.print(F("deserializeJson() failed: "));
-          Serial.println(error.f_str());
-          request->send(204, "text/plain", "error: parse error");
-          return;
-      }
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        DarkLimit = doc["limit"];
+        SaveLimit(DARK_BASE, DarkLimit);
+        request->send(200, "application/json", "dark limit set");
+    });
 
-      request->send(200, "application/json", "scene set");
+    wifiServer.on("/dim/rgb", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+    {
+    },
+    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+    {
+    },
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
+      StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        int channel = doc["channel"];
+        int red = doc["red"];
+        int green = doc["green"];
+        int blue = doc["blue"];
+        Dim = RGB(red, green, blue);
+        SaveRGB(DIM_BASE, Dim);
+        UpdateFromScene(currentLightSetting);
+        request->send(200, "application/json", "dim rgb set");
+    });
+
+    wifiServer.on("/dim/limit", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+    {
+    },
+    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+    {
+    },
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
+      StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        DimLimit = doc["limit"];
+        SaveLimit(DIM_BASE, DimLimit);
+        request->send(200, "application/json", "dim limit set");
+    });
+
+    wifiServer.on("/light/rgb", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+    {
+    },
+    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+    {
+    },
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
+      StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        int channel = doc["channel"];
+        int red = doc["red"];
+        int green = doc["green"];
+        int blue = doc["blue"];
+        Light = RGB(red, green, blue);
+        SaveRGB(LIGHT_BASE, Light);
+        UpdateFromScene(currentLightSetting);
+        request->send(200, "application/json", "light rgb set");
+    });
+
+    wifiServer.on("/light/limit", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+    {
+    },
+    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+    {
+    },
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
+      StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        LightLimit = doc["limit"];
+        SaveLimit(LIGHT_BASE, LightLimit);
+        request->send(200, "application/json", "light limit set");
+    });
+
+    wifiServer.on("/bright", HTTP_PUT,
+      [](AsyncWebServerRequest *request)
+    {
+    },
+    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+    {
+    },
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
+      StaticJsonDocument<200> doc;
+        DeserializationError error = deserializeJson(doc, data);
+        if (error) 
+        {
+            Serial.print(F("deserializeJson() failed: "));
+            Serial.println(error.f_str());
+            request->send(204, "text/plain", "error: parse error");
+            return;
+        }
+  
+        int channel = doc["channel"];
+        int red = doc["red"];
+        int green = doc["green"];
+        int blue = doc["blue"];
+        Bright = RGB(red, green, blue);
+        SaveRGB(BRIGHT_BASE, Bright);
+        UpdateFromScene(currentLightSetting);
+        request->send(200, "application/json", "dark set");
+    });
+
+//    wifiServer.on("/LightSensor", HTTP_GET,
+//      [](AsyncWebServerRequest *request)
+//    {
+//    },
+//    [](AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final)
+//    {
+//    },
+//    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+//    {
+//      StaticJsonDocument<200> doc;
+//        DeserializationError error = deserializeJson(doc, data);
+//        if (error) 
+//        {
+//            Serial.print(F("deserializeJson() failed: "));
+//            Serial.println(error.f_str());
+//            request->send(204, "text/plain", "error: parse error");
+//            return;
+//        }
+//        doc["als"] = ALS;
+//        String output;
+//        serializeJson(doc, output);
+//        request->send(200, "text/plain", "light sensor yo");
+//    });
+
+    wifiServer.on("/LightSensor", HTTP_GET, [](AsyncWebServerRequest *request){
+      
+      StaticJsonDocument<200> doc;
+      doc["als"] = ALS;
+        String output;
+        serializeJson(doc, output);
+        request->send(200, "application/json", output);
     });
 
     // Route to load style.css file
@@ -609,23 +883,33 @@ void setup()
     pixels3.begin();
     pixels4.begin();
 
-  SetAllLEDs(1, 1,0,1);
+//  SetAllLEDs(1, 1,0,1);
     EEPROM.begin(EEPROM_SIZE);
     if(EEPROM.read(0) == 0xff)
     {
 //      StartBluetoothServer();
         const char* ssid = "DevinsHotWifi";
         const char* pw = "RickAndMorty123";
+        Serial.println(pw);
         Serial.println(ssid);
         Serial.println(pw);
-
+        
         SaveCredentials(ssid, pw);
     }
     else
     {
-        String ssid = LoadSSID();
-        String pw = LoadPassword();
-        StartWifiServer(ssid.c_str(), pw.c_str());
+
+      const char* ssid = "DevinsHotWifi";
+        const char* pw = "RickAndMorty123";
+        Serial.println(ssid);
+        Serial.println(pw);
+        SaveCredentials(ssid, pw);
+    StartWifiServer(ssid, pw);
+//        String ssid = LoadSSID();
+//        String pw = LoadPassword();
+        LoadLimitsFromFlash();
+        LoadRGBFromFlash();
+//        StartWifiServer(ssid.c_str(), pw.c_str());
     }
     
     // Initialize SPIFFS
